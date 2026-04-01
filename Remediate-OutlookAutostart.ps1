@@ -1,4 +1,4 @@
-# Remediate-OutlookAutostart.ps1
+z# Remediate-OutlookAutostart.ps1
 # Runs in user context
 $regPath  = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $regName  = "Outlook"
