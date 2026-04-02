@@ -22,3 +22,10 @@ $moflPath = # paste the actual path from above
 $sig = Get-AuthenticodeSignature $moflPath
 $sig | Format-List *
 $sig.SignerCertificate | Format-List Subject, Issuer, Thumbprint, NotAfter
+
+#Base64
+$sig = Get-AuthenticodeSignature "PASTE_THE_VFS_PATH_TO_MOFL.DLL"
+$bytes = $sig.SignerCertificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cer)
+$b64 = [System.Convert]::ToBase64String($bytes)
+$b64 | Set-Clipboard
+Write-Host "Base64 copied to clipboard" -ForegroundColor Green
