@@ -33,3 +33,13 @@ if ($sig.SignerCertificate) {
 } else {
     Write-Warning "No signer certificate found — check the file path"
 }
+
+
+$vfsPath = "PASTE_YOUR_VFS_SMART_TAG_FOLDER_PATH"
+Get-ChildItem "$vfsPath\*.dll" | ForEach-Object {
+    $sig = Get-AuthenticodeSignature $_.FullName
+    [PSCustomObject]@{
+        File       = $_.Name
+        Thumbprint = $sig.SignerCertificate.Thumbprint
+    }
+} | Format-Table -AutoSize
