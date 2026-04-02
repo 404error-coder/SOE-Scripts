@@ -103,3 +103,7 @@ if ($sig.SignerCertificate) {
     Write-Host $b64
     Write-Host ""
 }
+
+4f8a2c1e6b3d4907be5af1c2d8e0937401a2b3c4
+7d3e5b9a1c6f4280a4d8e2b7f0c1395602d4e5f6
+b2c9d4e8f1a3470685e7c0d2f9b46a1303f7a8b9
