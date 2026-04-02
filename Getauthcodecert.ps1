@@ -25,7 +25,11 @@ $sig.SignerCertificate | Format-List Subject, Issuer, Thumbprint, NotAfter
 
 #Base64
 $sig = Get-AuthenticodeSignature "PASTE_THE_VFS_PATH_TO_MOFL.DLL"
-$bytes = $sig.SignerCertificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cer)
-$b64 = [System.Convert]::ToBase64String($bytes)
-$b64 | Set-Clipboard
-Write-Host "Base64 copied to clipboard" -ForegroundColor Green
+if ($sig.SignerCertificate) {
+    $bytes = $sig.SignerCertificate.Export('Cert')
+    $b64 = [System.Convert]::ToBase64String($bytes)
+    $b64 | Set-Clipboard
+    Write-Host "Base64 copied to clipboard — Thumbprint: $($sig.SignerCertificate.Thumbprint)" -ForegroundColor Green
+} else {
+    Write-Warning "No signer certificate found — check the file path"
+}
