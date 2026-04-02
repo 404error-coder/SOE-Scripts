@@ -43,3 +43,32 @@ Get-ChildItem "$vfsPath\*.dll" | ForEach-Object {
         Thumbprint = $sig.SignerCertificate.Thumbprint
     }
 } | Format-Table -AutoSize
+
+
+$vfsPath = "PASTE_YOUR_VFS_SMART_TAG_FOLDER_PATH"
+
+$certs = Get-ChildItem "$vfsPath\*.dll" | ForEach-Object {
+    $sig = Get-AuthenticodeSignature $_.FullName
+    $sig.SignerCertificate
+} | Where-Object { $_ } | Sort-Object Thumbprint -Unique
+
+$i = 1
+foreach ($cert in $certs) {
+    $b64 = [System.Convert]::ToBase64String($cert.Export('Cert'))
+    $guid = [guid]::NewGuid().ToString()
+    
+    Write-Host "=== CERTIFICATE $i ===" -ForegroundColor Cyan
+    Write-Host "Subject:     $($cert.Subject)"
+    Write-Host "Thumbprint:  $($cert.Thumbprint)"
+    Write-Host "Expires:     $($cert.NotAfter)"
+    Write-Host ""
+    Write-Host "OMA-URI:"
+    Write-Host "./Device/Vendor/MSFT/RootCATrustedCertificates/TrustedPublisher/$guid/EncodedCertificate"
+    Write-Host ""
+    Write-Host "BASE64 VALUE:" -ForegroundColor Yellow
+    Write-Host $b64
+    Write-Host ""
+    Write-Host ("=" * 60)
+    Write-Host ""
+    $i++
+}
