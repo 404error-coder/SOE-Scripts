@@ -72,3 +72,16 @@ foreach ($cert in $certs) {
     Write-Host ""
     $i++
 }
+
+
+#VSTOEE
+$vstoPath = Get-ChildItem -Path "${env:ProgramFiles}\Microsoft Office\root" -Recurse -Filter "vstoee.dll" -ErrorAction SilentlyContinue | Select -First 1 -ExpandProperty FullName
+
+if ($vstoPath) {
+    $sig = Get-AuthenticodeSignature $vstoPath
+    Write-Host "Path:        $vstoPath"
+    Write-Host "Thumbprint:  $($sig.SignerCertificate.Thumbprint)"
+    Write-Host "Subject:     $($sig.SignerCertificate.Subject)"
+} else {
+    Write-Warning "vstoee.dll not found under C2R root"
+}
