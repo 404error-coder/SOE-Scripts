@@ -85,3 +85,21 @@ if ($vstoPath) {
 } else {
     Write-Warning "vstoee.dll not found under C2R root"
 }
+
+
+$sig = Get-AuthenticodeSignature "PASTE_VSTOEE_FULL_PATH"
+if ($sig.SignerCertificate) {
+    $b64 = [System.Convert]::ToBase64String($sig.SignerCertificate.Export('Cert'))
+    $guid = [guid]::NewGuid().ToString()
+    
+    Write-Host "=== CERTIFICATE 3 — VSTO ===" -ForegroundColor Cyan
+    Write-Host "Subject:     $($sig.SignerCertificate.Subject)"
+    Write-Host "Thumbprint:  $($sig.SignerCertificate.Thumbprint)"
+    Write-Host ""
+    Write-Host "OMA-URI:"
+    Write-Host "./Device/Vendor/MSFT/RootCATrustedCertificates/TrustedPublisher/$guid/EncodedCertificate"
+    Write-Host ""
+    Write-Host "BASE64 VALUE:" -ForegroundColor Yellow
+    Write-Host $b64
+    Write-Host ""
+}
