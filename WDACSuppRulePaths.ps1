@@ -1,89 +1,177 @@
 <#
 .SYNOPSIS
     WDAC Supplemental Policy - App Discovery Script
+
 .DESCRIPTION
     Discovers all file system locations for a given app to inform WDAC
-    supplemental policy scan paths. Outputs to console and exports to file.
+    supplemental policy scan paths in AppControl Manager.
+    
+    Uses five discovery methods:
+      1. Registry uninstall keys
+      2. Running processes and their loaded modules
+      3. Windows services
+      4. Kernel-mode drivers
+      5. File system search under Program Files / ProgramData / drivers
+
 .NOTES
-    Run as Administrator on a device with the target app installed.
-    Launch the app before running for best results (captures loaded modules).
+    - Run as Administrator on a device with the target app installed
+    - Launch the app BEFORE running for best loaded-module coverage
+    - Run from 64-bit PowerShell (not Windows PowerShell x86) to enumerate
+      64-bit process modules
+    - Outputs TXT report + CSV of unique scan paths to $OutputDir
 #>
+
+#Requires -RunAsAdministrator
 
 # ============================================================================
 # CONFIGURATION - Change these for each app
 # ============================================================================
 
 $AppName       = "VMwareHorizon"                # Short name for output files
-$SearchPattern = 'VMware|Horizon'               # Regex pattern to match app
+$SearchPattern = 'VMware|Horizon'               # Regex to match app name/path
 $ProcessMatch  = 'vmware|horizon|vmware-view'   # Regex to match running processes
-$OutputDir     = "C:\Temp\WDAC\Discovery"       # Where to save output
+$OutputDir     = "C:\Temp\WDAC\Discovery"       # Output directory
 
-# Examples for your other apps:
-# $AppName = "JanusSeal";  $SearchPattern = 'Janus';             $ProcessMatch = 'janus|jsoutlook|js4office'
-# $AppName = "ControlUp";  $SearchPattern = 'ControlUp|Smart-X'; $ProcessMatch = 'cuAgent|controlup|smart-x'
+# Examples for your other apps (uncomment and comment out the Horizon block above):
+# $AppName = "JanusSeal"
+# $SearchPattern = 'Janus'
+# $ProcessMatch  = 'janus|jsoutlook|js4office'
+
+# $AppName = "ControlUp"
+# $SearchPattern = 'ControlUp|Smart-X'
+# $ProcessMatch  = 'cuAgent|controlup|smart-x'
 
 # ============================================================================
 # SETUP
 # ============================================================================
 
-$ErrorActionPreference = 'SilentlyContinue'
-
+# Ensure output directory exists
 if (-not (Test-Path $OutputDir)) {
     New-Item -Path $OutputDir -ItemType Directory -Force | Out-Null
 }
 
-$timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
-$reportFile  = Join-Path $OutputDir "$($AppName)_Discovery_$timestamp.txt"
-$pathsFile   = Join-Path $OutputDir "$($AppName)_ScanPaths_$timestamp.csv"
-$allPaths    = [System.Collections.Generic.List[string]]::new()
+$timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+$reportFile = Join-Path $OutputDir "$($AppName)_Discovery_$timestamp.txt"
+$pathsFile  = Join-Path $OutputDir "$($AppName)_ScanPaths_$timestamp.csv"
 
-# Helper to write to both console and file
+# Track discovered paths - keyed by path for deduplication with source merging
+$discoveredPaths = @{}
+
+# Exclusion patterns - paths matching any of these are skipped
+$excludePatterns = @(
+    '^C:\\Windows\\System32$'
+    '^C:\\Windows\\SysWOW64$'
+    '^C:\\Windows\\WinSxS'
+    '^C:\\Windows\\Installer'
+    '^C:\\Windows\\assembly'
+    '\\Logs$'
+    '\\Logs\\'
+    '\\Cache$'
+    '\\Cache\\'
+    '\\Temp$'
+    '\\Temp\\'
+    '\\CrashDumps'
+)
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
 function Write-Report {
-    param([string]$Text, [string]$Color = 'White')
-    Write-Host $Text -ForegroundColor $Color
-    Add-Content -Path $reportFile -Value $Text
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [string]$Color = 'White',
+        [switch]$NoConsole
+    )
+    if (-not $NoConsole) {
+        Write-Host $Text -ForegroundColor $Color
+    }
+    Add-Content -Path $script:reportFile -Value $Text -Encoding UTF8
+}
+
+function Resolve-DriverPath {
+    param([string]$RawPath)
+    
+    if ([string]::IsNullOrWhiteSpace($RawPath)) { return $null }
+    
+    # Handle NT-style paths that Win32_SystemDriver sometimes returns
+    $resolved = $RawPath
+    $resolved = $resolved -replace '^\\\?\?\\', ''
+    $resolved = $resolved -replace '^\\SystemRoot\\', "$env:SystemRoot\"
+    $resolved = $resolved -replace '^System32\\', "$env:SystemRoot\System32\"
+    
+    # If still relative, assume System32
+    if ($resolved -notmatch '^[A-Za-z]:\\') {
+        $resolved = Join-Path "$env:SystemRoot\System32" $resolved
+    }
+    
+    return $resolved
+}
+
+function Resolve-ServiceExePath {
+    param([string]$PathName)
+    
+    if ([string]::IsNullOrWhiteSpace($PathName)) { return $null }
+    
+    # Handles: "C:\path with spaces\svc.exe" -args
+    # Also:    C:\path\svc.exe -args
+    # Also:    C:\path\svc.exe
+    if ($PathName -match '^"([^"]+)"') {
+        return $Matches[1]
+    }
+    elseif ($PathName -match '^(\S+\.exe)') {
+        return $Matches[1]
+    }
+    else {
+        return ($PathName -split ' ')[0]
+    }
 }
 
 function Add-ScanPath {
-    param([string]$Path, [string]$Source)
-    if ([string]::IsNullOrWhiteSpace($Path)) { return }
-    if (-not (Test-Path $Path)) { return }
-    
-    # Normalise to directory
-    $dir = if ((Get-Item $Path -ErrorAction SilentlyContinue).PSIsContainer) {
-        $Path
-    } else {
-        Split-Path $Path -Parent
-    }
-    
-    # Exclude Windows system paths (covered by Allow Microsoft base)
-    $excludePatterns = @(
-        '^C:\\Windows\\System32$',
-        '^C:\\Windows\\SysWOW64$',
-        '^C:\\Windows\\WinSxS',
-        '^C:\\Windows\\Installer',
-        '^C:\\Windows\\assembly',
-        '\\Logs$',
-        '\\Logs\\',
-        '\\Cache$',
-        '\\Cache\\',
-        '\\Temp$',
-        '\\Temp\\'
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Source
     )
     
-    foreach ($pattern in $excludePatterns) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    
+    # Resolve to full path and determine if file or directory
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    
+    $dir = if ($item.PSIsContainer) {
+        $item.FullName
+    } else {
+        Split-Path -Path $item.FullName -Parent
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($dir)) { return }
+    
+    # Apply exclusion patterns
+    foreach ($pattern in $script:excludePatterns) {
         if ($dir -match $pattern) { return }
     }
     
-    $allPaths.Add([PSCustomObject]@{
-        Path   = $dir
-        Source = $Source
-    })
+    # Normalise trailing backslash
+    $dir = $dir.TrimEnd('\')
+    
+    # Add or merge source attribution
+    if ($script:discoveredPaths.ContainsKey($dir)) {
+        $existing = $script:discoveredPaths[$dir]
+        if ($existing -notcontains $Source) {
+            $script:discoveredPaths[$dir] = @($existing) + $Source
+        }
+    } else {
+        $script:discoveredPaths[$dir] = @($Source)
+    }
 }
 
 # ============================================================================
 # HEADER
 # ============================================================================
+
+# Initialise report file (truncate if exists)
+Set-Content -Path $reportFile -Value "" -Encoding UTF8
 
 Write-Report ""
 Write-Report "================================================================" 'Cyan'
@@ -94,8 +182,18 @@ Write-Report "  Search Pattern:  $SearchPattern"
 Write-Report "  Process Match:   $ProcessMatch"
 Write-Report "  Generated:       $(Get-Date)"
 Write-Report "  Computer:        $env:COMPUTERNAME"
+Write-Report "  User:            $env:USERNAME"
+Write-Report "  PS Version:      $($PSVersionTable.PSVersion)"
+Write-Report "  PS Architecture: $([Environment]::Is64BitProcess ? '64-bit' : '32-bit')"
 Write-Report "================================================================" 'Cyan'
 Write-Report ""
+
+if (-not [Environment]::Is64BitProcess) {
+    Write-Report "WARNING: Running in 32-bit PowerShell. Cannot enumerate modules" 'Yellow'
+    Write-Report "         from 64-bit processes. Re-run in 64-bit PowerShell for" 'Yellow'
+    Write-Report "         complete coverage." 'Yellow'
+    Write-Report ""
+}
 
 # ============================================================================
 # METHOD 1: Registry Uninstall Keys
@@ -105,13 +203,25 @@ Write-Report ""
 Write-Report "=== [1/5] REGISTRY UNINSTALL KEYS ===" 'Yellow'
 Write-Report ""
 
-$uninstallKeys = @(
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+$uninstallKeyPaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
 )
 
-$installedApps = Get-ItemProperty $uninstallKeys -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName -match $SearchPattern }
+$installedApps = foreach ($keyPath in $uninstallKeyPaths) {
+    if (Test-Path $keyPath) {
+        Get-ChildItem -Path $keyPath -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $props = Get-ItemProperty -Path $_.PSPath -ErrorAction Stop
+                if ($props.DisplayName -match $SearchPattern) {
+                    $props
+                }
+            } catch {
+                # Skip keys we can't read
+            }
+        }
+    }
+}
 
 if ($installedApps) {
     foreach ($app in $installedApps) {
@@ -141,37 +251,41 @@ Write-Report ""
 Write-Report "NOTE: Launch the app before running for best results." 'Gray'
 Write-Report ""
 
-$matchedProcesses = Get-Process | Where-Object {
+$matchedProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object {
     ($_.Name -match $ProcessMatch) -or 
-    ($_.Path -and $_.Path -match $SearchPattern)
+    ($_.Path -and ($_.Path -match $SearchPattern))
 }
 
 if ($matchedProcesses) {
     Write-Report "Found $($matchedProcesses.Count) matching process(es):"
     Write-Report ""
     
-    $moduleDirs = @{}
+    $moduleDirCounts = @{}
     
     foreach ($proc in $matchedProcesses) {
-        Write-Report "  PID $($proc.Id): $($proc.Name) - $($proc.Path)"
+        $procPath = if ($proc.Path) { $proc.Path } else { "<unknown>" }
+        Write-Report "  PID $($proc.Id): $($proc.Name) - $procPath"
         
         if ($proc.Path) {
             Add-ScanPath -Path $proc.Path -Source "Process:$($proc.Name)"
         }
         
         try {
-            foreach ($mod in $proc.Modules) {
+            $modules = $proc.Modules
+            foreach ($mod in $modules) {
                 if ($mod.FileName) {
-                    $dir = Split-Path $mod.FileName -Parent
-                    if ($moduleDirs.ContainsKey($dir)) {
-                        $moduleDirs[$dir]++
+                    $dir = Split-Path -Path $mod.FileName -Parent
+                    if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+                    
+                    if ($moduleDirCounts.ContainsKey($dir)) {
+                        $moduleDirCounts[$dir]++
                     } else {
-                        $moduleDirs[$dir] = 1
+                        $moduleDirCounts[$dir] = 1
                     }
                 }
             }
         } catch {
-            Write-Report "    [!] Cannot read modules for PID $($proc.Id) - $($_.Exception.Message)" 'Red'
+            Write-Report "    [!] Cannot read modules for PID $($proc.Id): $($_.Exception.Message)" 'Red'
         }
     }
     
@@ -179,13 +293,18 @@ if ($matchedProcesses) {
     Write-Report "Loaded module directories (excluding Windows system paths):"
     Write-Report ""
     
-    $moduleDirs.GetEnumerator() | 
+    $sortedDirs = $moduleDirCounts.GetEnumerator() |
         Where-Object { $_.Key -notmatch '^C:\\Windows' } |
-        Sort-Object Value -Descending |
-        ForEach-Object {
-            Write-Report ("  [{0,4} files] {1}" -f $_.Value, $_.Key)
-            Add-ScanPath -Path $_.Key -Source "LoadedModules"
+        Sort-Object -Property Value -Descending
+    
+    if ($sortedDirs) {
+        foreach ($entry in $sortedDirs) {
+            Write-Report ("  [{0,4} files] {1}" -f $entry.Value, $entry.Key)
+            Add-ScanPath -Path $entry.Key -Source "LoadedModules"
         }
+    } else {
+        Write-Report "  (All loaded modules were from Windows system paths)" 'Gray'
+    }
 } else {
     Write-Report "  No matching processes currently running." 'Gray'
     Write-Report "  Launch the app and re-run this script for better coverage." 'Gray'
@@ -208,23 +327,18 @@ $services = Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContin
 
 if ($services) {
     foreach ($svc in $services) {
-        # Extract exe path from PathName (handles quoted paths with arguments)
-        $exePath = if ($svc.PathName -match '^"([^"]+)"') { 
-            $matches[1] 
-        } elseif ($svc.PathName -match '^(\S+)') {
-            $matches[1]
-        } else {
-            $svc.PathName
-        }
+        $exePath = Resolve-ServiceExePath -PathName $svc.PathName
         
-        Write-Report "Service:    $($svc.Name)"
-        Write-Report "  Display:  $($svc.DisplayName)"
-        Write-Report "  State:    $($svc.State)"
-        Write-Report "  StartMode:$($svc.StartMode)"
-        Write-Report "  ExePath:  $exePath"
+        Write-Report "Service:     $($svc.Name)"
+        Write-Report "  Display:   $($svc.DisplayName)"
+        Write-Report "  State:     $($svc.State)"
+        Write-Report "  StartMode: $($svc.StartMode)"
+        Write-Report "  ExePath:   $exePath"
         Write-Report ""
         
-        Add-ScanPath -Path $exePath -Source "Service:$($svc.Name)"
+        if ($exePath) {
+            Add-ScanPath -Path $exePath -Source "Service:$($svc.Name)"
+        }
     }
 } else {
     Write-Report "  No matching services found." 'Gray'
@@ -247,14 +361,19 @@ $drivers = Get-CimInstance -ClassName Win32_SystemDriver -ErrorAction SilentlyCo
 
 if ($drivers) {
     foreach ($drv in $drivers) {
-        Write-Report "Driver:     $($drv.Name)"
-        Write-Report "  Display:  $($drv.DisplayName)"
-        Write-Report "  State:    $($drv.State)"
-        Write-Report "  StartMode:$($drv.StartMode)"
-        Write-Report "  Path:     $($drv.PathName)"
+        $resolvedPath = Resolve-DriverPath -RawPath $drv.PathName
+        
+        Write-Report "Driver:       $($drv.Name)"
+        Write-Report "  Display:    $($drv.DisplayName)"
+        Write-Report "  State:      $($drv.State)"
+        Write-Report "  StartMode:  $($drv.StartMode)"
+        Write-Report "  RawPath:    $($drv.PathName)"
+        Write-Report "  Resolved:   $resolvedPath"
         Write-Report ""
         
-        Add-ScanPath -Path $drv.PathName -Source "Driver:$($drv.Name)"
+        if ($resolvedPath) {
+            Add-ScanPath -Path $resolvedPath -Source "Driver:$($drv.Name)"
+        }
     }
 } else {
     Write-Report "  No matching kernel drivers found." 'Gray'
@@ -269,9 +388,9 @@ Write-Report "=== [5/5] FILE SYSTEM SEARCH ===" 'Yellow'
 Write-Report ""
 
 $searchRoots = @(
-    'C:\Program Files',
-    'C:\Program Files (x86)',
-    'C:\ProgramData',
+    'C:\Program Files'
+    'C:\Program Files (x86)'
+    'C:\ProgramData'
     'C:\Windows\System32\drivers'
 )
 
@@ -280,25 +399,26 @@ foreach ($root in $searchRoots) {
     
     Write-Report "Searching: $root"
     
-    $matches = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+    # Search for matching directories
+    $foundDirs = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $SearchPattern }
     
-    if ($matches) {
-        foreach ($match in $matches) {
-            Write-Report "  Found: $($match.FullName)"
-            Add-ScanPath -Path $match.FullName -Source "FileSystem:$root"
+    if ($foundDirs) {
+        foreach ($dir in $foundDirs) {
+            Write-Report "  Found: $($dir.FullName)"
+            Add-ScanPath -Path $dir.FullName -Source "FileSystem:$root"
             
-            # Also check one level deeper for nested vendor folders
-            $subDirs = Get-ChildItem -Path $match.FullName -Directory -ErrorAction SilentlyContinue
+            # Show one level of sub-directories for context
+            $subDirs = Get-ChildItem -Path $dir.FullName -Directory -ErrorAction SilentlyContinue
             foreach ($sub in $subDirs) {
-                Write-Report "    Sub:   $($sub.FullName)"
+                Write-Report "    Sub: $($sub.FullName)"
             }
         }
     }
     
-    # Also search for files matching the pattern in drivers folder
+    # Also search for matching .sys driver files when scanning drivers folder
     if ($root -eq 'C:\Windows\System32\drivers') {
-        $driverFiles = Get-ChildItem -Path $root -File -Filter "*.sys" -ErrorAction SilentlyContinue |
+        $driverFiles = Get-ChildItem -Path $root -File -Filter '*.sys' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match $SearchPattern }
         
         foreach ($drv in $driverFiles) {
@@ -318,31 +438,34 @@ Write-Report "  RECOMMENDED SCAN PATHS FOR APPCONTROL MANAGER" 'Green'
 Write-Report "================================================================" 'Green'
 Write-Report ""
 
-$uniquePaths = $allPaths | 
-    Group-Object Path | 
-    ForEach-Object {
-        [PSCustomObject]@{
-            Path    = $_.Name
-            Sources = ($_.Group.Source | Sort-Object -Unique) -join '; '
-            Count   = $_.Count
+if ($discoveredPaths.Count -gt 0) {
+    # Build ordered list for export
+    $exportList = $discoveredPaths.GetEnumerator() |
+        Sort-Object -Property Key |
+        ForEach-Object {
+            [PSCustomObject][ordered]@{
+                Path    = $_.Key
+                Sources = ($_.Value | Sort-Object -Unique) -join '; '
+            }
         }
-    } |
-    Sort-Object Path
-
-if ($uniquePaths) {
-    foreach ($p in $uniquePaths) {
+    
+    foreach ($entry in $exportList) {
         Write-Report ""
-        Write-Report "  PATH:    $($p.Path)" 'Green'
-        Write-Report "  SOURCES: $($p.Sources)"
+        Write-Report "  PATH:    $($entry.Path)" 'Green'
+        Write-Report "  SOURCES: $($entry.Sources)"
     }
     
     Write-Report ""
-    Write-Report "Total unique scan paths: $($uniquePaths.Count)" 'Cyan'
+    Write-Report "Total unique scan paths: $($exportList.Count)" 'Cyan'
     
     # Export to CSV
-    $uniquePaths | Export-Csv -Path $pathsFile -NoTypeInformation
-    Write-Report ""
-    Write-Report "Scan paths exported to CSV: $pathsFile" 'Cyan'
+    try {
+        $exportList | Export-Csv -Path $pathsFile -NoTypeInformation -Encoding UTF8 -Force
+        Write-Report ""
+        Write-Report "Scan paths exported to CSV: $pathsFile" 'Cyan'
+    } catch {
+        Write-Report "ERROR exporting CSV: $($_.Exception.Message)" 'Red'
+    }
 } else {
     Write-Report "  No scan paths discovered." 'Red'
     Write-Report "  Verify the app is installed and the search pattern is correct." 'Red'
