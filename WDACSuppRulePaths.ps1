@@ -79,7 +79,7 @@ $excludePatterns = @(
 
 function Write-Report {
     param(
-        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
         [string]$Color = 'White',
         [switch]$NoConsole
     )
@@ -184,7 +184,7 @@ Write-Report "  Generated:       $(Get-Date)"
 Write-Report "  Computer:        $env:COMPUTERNAME"
 Write-Report "  User:            $env:USERNAME"
 Write-Report "  PS Version:      $($PSVersionTable.PSVersion)"
-Write-Report "  $psArch = if ([Environment]::Is64BitProcess) { '64-bit' } else { '32-bit' }
+Write-Report "  $psArch = if ([Environment]::Is64BitProcess) { '64-bit' } else { '32-bit' }"
 Write-Report "  PS Architecture: $psArch"
 Write-Report "================================================================" 'Cyan'
 Write-Report ""
