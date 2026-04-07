@@ -1,11 +1,11 @@
 #Step 1
 Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' |
-    Where-Object { $_.DisplayName -match 'Horizon|VMware|Omnissa' } |
+    Where-Object { $_.DisplayName -match 'Horizon|VMware|' } |
     Select-Object DisplayName, InstallLocation, Publisher
 
 #Step 2
-Get-Process | Where-Object { $_.Path -match 'VMware|Horizon|Omnissa' -and $_.Path } |
+Get-Process | Where-Object { $_.Path -match 'VMware|Horizon' -and $_.Path } |
     ForEach-Object { 
         $_.Modules | Select-Object -ExpandProperty FileName 
     } |
@@ -14,7 +14,23 @@ Get-Process | Where-Object { $_.Path -match 'VMware|Horizon|Omnissa' -and $_.Pat
     Sort-Object -Unique
 
 #Step 3
-Get-CimInstance Win32_Service, Win32_SystemDriver |
-    Where-Object { $_.PathName -match 'VMware|Horizon|Omnissa' } |
-    Select-Object Name, @{N='Path';E={ ($_.PathName -split '"')[1] }}, 
-                  @{N='Directory';E={ Split-Path (($_.PathName -split '"')[1]) -Parent }}
+$searchPattern = 'VMware|Horizon'  # adjust per app
+
+Write-Host "`n=== SERVICES ===" -ForegroundColor Cyan
+Get-CimInstance -ClassName Win32_Service |
+    Where-Object { $_.PathName -match $searchPattern } |
+    Select-Object Name, DisplayName, State,
+        @{N='Path';E={ if ($_.PathName -match '"([^"]+)"') { $matches[1] } else { ($_.PathName -split ' ')[0] } }},
+        @{N='Directory';E={ 
+            $p = if ($_.PathName -match '"([^"]+)"') { $matches[1] } else { ($_.PathName -split ' ')[0] }
+            Split-Path $p -Parent
+        }} |
+    Format-List
+
+Write-Host "`n=== KERNEL DRIVERS ===" -ForegroundColor Cyan
+Get-CimInstance -ClassName Win32_SystemDriver |
+    Where-Object { $_.PathName -match $searchPattern } |
+    Select-Object Name, DisplayName, State,
+        @{N='Path';E={ $_.PathName }},
+        @{N='Directory';E={ Split-Path $_.PathName -Parent }} |
+    Format-List
